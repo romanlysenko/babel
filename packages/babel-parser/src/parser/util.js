@@ -14,6 +14,7 @@ import ProductionParameterHandler, {
   PARAM,
 } from "../util/production-parameter";
 import { Errors, type ErrorTemplate, ErrorCodes } from "./error";
+import type { ParsingError } from "./error";
 /*::
 import type ScopeHandler from "../util/scope";
 */
@@ -71,11 +72,17 @@ export default class UtilParser extends Tokenizer {
 
   isUnparsedContextual(nameStart: number, name: string): boolean {
     const nameEnd = nameStart + name.length;
-    return (
-      this.input.slice(nameStart, nameEnd) === name &&
-      (nameEnd === this.input.length ||
-        !isIdentifierChar(this.input.charCodeAt(nameEnd)))
-    );
+    if (this.input.slice(nameStart, nameEnd) === name) {
+      const nextCh = this.input.charCodeAt(nameEnd);
+      return !(
+        isIdentifierChar(nextCh) ||
+        // check if `nextCh is between 0xd800 - 0xdbff,
+        // if `nextCh` is NaN, `NaN & 0xfc00` is 0, the function
+        // returns true
+        (nextCh & 0xfc00) === 0xd800
+      );
+    }
+    return false;
   }
 
   isLookaheadContextual(name: string): boolean {
@@ -169,6 +176,7 @@ export default class UtilParser extends Tokenizer {
         template: `Unexpected token, expected "${messageOrType.label}"`,
       };
     }
+
     /* eslint-disable @babel/development-internal/dry-error-messages */
     throw this.raise(pos != null ? pos : this.state.start, messageOrType);
     /* eslint-enable @babel/development-internal/dry-error-messages */
@@ -205,7 +213,7 @@ export default class UtilParser extends Tokenizer {
     oldState: State = this.state.clone(),
   ):
     | TryParse<T, null, false, false, null>
-    | TryParse<T | null, SyntaxError, boolean, false, State>
+    | TryParse<T | null, ParsingError, boolean, false, State>
     | TryParse<T | null, null, false, true, State> {
     const abortSignal: { node: T | null } = { node: null };
     try {
@@ -222,7 +230,7 @@ export default class UtilParser extends Tokenizer {
         this.state.tokensLength = failState.tokensLength;
         return {
           node,
-          error: (failState.errors[oldState.errors.length]: SyntaxError),
+          error: (failState.errors[oldState.errors.length]: ParsingError),
           thrown: false,
           aborted: false,
           failState,
@@ -261,13 +269,21 @@ export default class UtilParser extends Tokenizer {
     andThrow: boolean,
   ) {
     if (!refExpressionErrors) return false;
-    const { shorthandAssign, doubleProto } = refExpressionErrors;
-    if (!andThrow) return shorthandAssign >= 0 || doubleProto >= 0;
+    const { shorthandAssign, doubleProto, optionalParameters } =
+      refExpressionErrors;
+    if (!andThrow) {
+      return (
+        shorthandAssign >= 0 || doubleProto >= 0 || optionalParameters >= 0
+      );
+    }
     if (shorthandAssign >= 0) {
       this.unexpected(shorthandAssign);
     }
     if (doubleProto >= 0) {
       this.raise(doubleProto, Errors.DuplicateProto);
+    }
+    if (optionalParameters >= 0) {
+      this.unexpected(optionalParameters);
     }
   }
 
@@ -343,8 +359,8 @@ export default class UtilParser extends Tokenizer {
     const oldLabels = this.state.labels;
     this.state.labels = [];
 
-    const oldExportedIdentifiers = this.state.exportedIdentifiers;
-    this.state.exportedIdentifiers = [];
+    const oldExportedIdentifiers = this.exportedIdentifiers;
+    this.exportedIdentifiers = new Set();
 
     // initialize scopes
     const oldInModule = this.inModule;
@@ -366,7 +382,7 @@ export default class UtilParser extends Tokenizer {
     return () => {
       // Revert state
       this.state.labels = oldLabels;
-      this.state.exportedIdentifiers = oldExportedIdentifiers;
+      this.exportedIdentifiers = oldExportedIdentifiers;
 
       // Revert scopes
       this.inModule = oldInModule;
@@ -388,17 +404,19 @@ export default class UtilParser extends Tokenizer {
 }
 
 /**
- * The ExpressionErrors is a context struct used to track
- * - **shorthandAssign**: track initializer `=` position when parsing ambiguous
- *   patterns. When we are sure the parsed pattern is a RHS, which means it is
- *   not a pattern, we will throw on this position on invalid assign syntax,
- *   otherwise it will be reset to -1
- * - **doubleProto**: track the duplicate `__proto__` key position when parsing
- *   ambiguous object patterns. When we are sure the parsed pattern is a RHS,
- *   which means it is an object literal, we will throw on this position for
- *   __proto__ redefinition, otherwise it will be reset to -1
+ * The ExpressionErrors is a context struct used to track ambiguous patterns
+ * When we are sure the parsed pattern is a RHS, which means it is not a pattern,
+ * we will throw on this position on invalid assign syntax, otherwise it will be reset to -1
+ *
+ * Types of ExpressionErrors:
+ *
+ * - **shorthandAssign**: track initializer `=` position
+ * - **doubleProto**: track the duplicate `__proto__` key position
+ * - **optionalParameters**: track the optional paramter (`?`).
+ * It's only used by typescript and flow plugins
  */
 export class ExpressionErrors {
   shorthandAssign = -1;
   doubleProto = -1;
+  optionalParameters = -1;
 }

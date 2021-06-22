@@ -41,15 +41,19 @@ The corejs3 polyfill entry has been replaced with the following polyfills:
   es.array.iterator { "samsung":"8.2" }
   es.array.reduce { "samsung":"8.2" }
   es.array.reduce-right { "samsung":"8.2" }
+  es.array.sort { "samsung":"8.2" }
   es.array.unscopables.flat { "samsung":"8.2" }
   es.array.unscopables.flat-map { "samsung":"8.2" }
   es.math.hypot { "samsung":"8.2" }
   es.object.from-entries { "samsung":"8.2" }
   es.promise { "samsung":"8.2" }
   es.promise.finally { "samsung":"8.2" }
+  es.regexp.constructor { "samsung":"8.2" }
+  es.regexp.exec { "samsung":"8.2" }
   es.string.replace { "samsung":"8.2" }
   es.string.trim-end { "samsung":"8.2" }
   es.string.trim-start { "samsung":"8.2" }
+  es.typed-array.sort { "samsung":"8.2" }
   web.dom-collections.iterator { "samsung":"8.2" }
   web.immediate { "samsung":"8.2" }
   web.queue-microtask { "samsung":"8.2" }

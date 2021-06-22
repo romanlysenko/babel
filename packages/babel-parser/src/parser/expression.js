@@ -19,7 +19,6 @@
 // [opp]: http://en.wikipedia.org/wiki/Operator-precedence_parser
 
 import { types as tt, type TokenType } from "../tokenizer/types";
-import { types as ct } from "../tokenizer/context";
 import * as N from "../types";
 import LValParser from "./lval";
 import {
@@ -28,8 +27,8 @@ import {
   isStrictReservedWord,
   isStrictBindReservedWord,
   isIdentifierStart,
+  canBeReservedWord,
 } from "../util/identifier";
-import type { Pos } from "../util/location";
 import { Position } from "../util/location";
 import * as charCodes from "charcodes";
 import {
@@ -56,6 +55,7 @@ import {
   newExpressionScope,
 } from "../util/expression-scope";
 import { Errors, SourceTypeModuleErrors } from "./error";
+import type { ParsingError } from "./error";
 
 /*::
 import type { SourceType } from "../options";
@@ -221,14 +221,9 @@ export default class ExpressionParser extends LValParser {
   parseMaybeAssignDisallowIn(
     refExpressionErrors?: ?ExpressionErrors,
     afterLeftParse?: Function,
-    refNeedsArrowPos?: ?Pos,
   ) {
     return this.disallowInAnd(() =>
-      this.parseMaybeAssign(
-        refExpressionErrors,
-        afterLeftParse,
-        refNeedsArrowPos,
-      ),
+      this.parseMaybeAssign(refExpressionErrors, afterLeftParse),
     );
   }
 
@@ -236,34 +231,33 @@ export default class ExpressionParser extends LValParser {
   parseMaybeAssignAllowIn(
     refExpressionErrors?: ?ExpressionErrors,
     afterLeftParse?: Function,
-    refNeedsArrowPos?: ?Pos,
   ) {
     return this.allowInAnd(() =>
-      this.parseMaybeAssign(
-        refExpressionErrors,
-        afterLeftParse,
-        refNeedsArrowPos,
-      ),
+      this.parseMaybeAssign(refExpressionErrors, afterLeftParse),
     );
+  }
+
+  // This method is only used by
+  // the typescript and flow plugins.
+  setOptionalParametersError(
+    refExpressionErrors: ExpressionErrors,
+    resultError?: ParsingError,
+  ) {
+    refExpressionErrors.optionalParameters =
+      resultError?.pos ?? this.state.start;
   }
 
   // Parse an assignment expression. This includes applications of
   // operators like `+=`.
-
   // https://tc39.es/ecma262/#prod-AssignmentExpression
   parseMaybeAssign(
     refExpressionErrors?: ?ExpressionErrors,
     afterLeftParse?: Function,
-    refNeedsArrowPos?: ?Pos,
   ): N.Expression {
     const startPos = this.state.start;
     const startLoc = this.state.startLoc;
     if (this.isContextual("yield")) {
       if (this.prodParam.hasYield) {
-        // If we have [Yield] production, `yield` will start a YieldExpression thus
-        // regex is allowed following. Otherwise `yield` is an identifier and regex
-        // is disallowed in tt.name.updateContext
-        this.state.exprAllowed = true;
         let left = this.parseYield();
         if (afterLeftParse) {
           left = afterLeftParse.call(this, left, startPos, startLoc);
@@ -284,10 +278,7 @@ export default class ExpressionParser extends LValParser {
       this.state.potentialArrowAt = this.state.start;
     }
 
-    let left = this.parseMaybeConditional(
-      refExpressionErrors,
-      refNeedsArrowPos,
-    );
+    let left = this.parseMaybeConditional(refExpressionErrors);
     if (afterLeftParse) {
       left = afterLeftParse.call(this, left, startPos, startLoc);
     }
@@ -322,10 +313,7 @@ export default class ExpressionParser extends LValParser {
   // Parse a ternary conditional (`?:`) operator.
   // https://tc39.es/ecma262/#prod-ConditionalExpression
 
-  parseMaybeConditional(
-    refExpressionErrors: ExpressionErrors,
-    refNeedsArrowPos?: ?Pos,
-  ): N.Expression {
+  parseMaybeConditional(refExpressionErrors: ExpressionErrors): N.Expression {
     const startPos = this.state.start;
     const startLoc = this.state.startLoc;
     const potentialArrowAt = this.state.potentialArrowAt;
@@ -335,16 +323,15 @@ export default class ExpressionParser extends LValParser {
       return expr;
     }
 
-    return this.parseConditional(expr, startPos, startLoc, refNeedsArrowPos);
+    return this.parseConditional(expr, startPos, startLoc, refExpressionErrors);
   }
 
   parseConditional(
     expr: N.Expression,
     startPos: number,
     startLoc: Position,
-    // FIXME: Disabling this for now since can't seem to get it to play nicely
     // eslint-disable-next-line no-unused-vars
-    refNeedsArrowPos?: ?Pos,
+    refExpressionErrors?: ?ExpressionErrors,
   ): N.Expression {
     if (this.eat(tt.question)) {
       const node = this.startNodeAt(startPos, startLoc);
@@ -766,28 +753,32 @@ export default class ExpressionParser extends LValParser {
     optional: boolean,
   ): N.Expression {
     const oldMaybeInArrowParameters = this.state.maybeInArrowParameters;
-    this.state.maybeInArrowParameters = true;
+    let refExpressionErrors = null;
 
+    this.state.maybeInArrowParameters = true;
     this.next(); // eat `(`
 
     let node = this.startNodeAt(startPos, startLoc);
     node.callee = base;
+
     if (state.maybeAsyncArrow) {
       this.expressionScope.enter(newAsyncArrowScope());
+      refExpressionErrors = new ExpressionErrors();
     }
 
     if (state.optionalChainMember) {
       node.optional = optional;
     }
+
     if (optional) {
-      node.arguments = this.parseCallExpressionArguments(tt.parenR, false);
+      node.arguments = this.parseCallExpressionArguments(tt.parenR);
     } else {
       node.arguments = this.parseCallExpressionArguments(
         tt.parenR,
-        state.maybeAsyncArrow,
         base.type === "Import",
         base.type !== "Super",
         node,
+        refExpressionErrors,
       );
     }
     this.finishCallExpression(node, state.optionalChainMember);
@@ -802,6 +793,7 @@ export default class ExpressionParser extends LValParser {
       );
     } else {
       if (state.maybeAsyncArrow) {
+        this.checkExpressionErrors(refExpressionErrors, true);
         this.expressionScope.exit();
       }
       this.toReferencedArguments(node);
@@ -890,10 +882,10 @@ export default class ExpressionParser extends LValParser {
 
   parseCallExpressionArguments(
     close: TokenType,
-    possibleAsyncArrow: boolean,
     dynamicImport?: boolean,
     allowPlaceholder?: boolean,
     nodeForExtra?: ?N.Node,
+    refExpressionErrors?: ?ExpressionErrors,
   ): $ReadOnlyArray<?N.Expression> {
     const elts = [];
     let first = true;
@@ -929,12 +921,7 @@ export default class ExpressionParser extends LValParser {
       }
 
       elts.push(
-        this.parseExprListItem(
-          false,
-          possibleAsyncArrow ? new ExpressionErrors() : undefined,
-          possibleAsyncArrow ? { start: 0 } : undefined,
-          allowPlaceholder,
-        ),
+        this.parseExprListItem(false, refExpressionErrors, allowPlaceholder),
       );
     }
 
@@ -982,11 +969,6 @@ export default class ExpressionParser extends LValParser {
   // AsyncArrowFunction
 
   parseExprAtom(refExpressionErrors?: ?ExpressionErrors): N.Expression {
-    // If a division operator appears in an expression position, the
-    // tokenizer got confused, and we force it to read a regexp instead.
-    if (this.state.type === tt.slash) this.readRegexp();
-
-    const canBeArrow = this.state.potentialArrowAt === this.state.start;
     let node;
 
     switch (this.state.type) {
@@ -1011,24 +993,12 @@ export default class ExpressionParser extends LValParser {
         return this.finishNode(node, "ThisExpression");
 
       case tt.name: {
+        const canBeArrow = this.state.potentialArrowAt === this.state.start;
         const containsEsc = this.state.containsEsc;
         const id = this.parseIdentifier();
 
         if (!containsEsc && id.name === "async" && !this.canInsertSemicolon()) {
           if (this.match(tt._function)) {
-            const last = this.state.context.length - 1;
-            if (this.state.context[last] !== ct.functionStatement) {
-              // Since "async" is an identifier and normally identifiers
-              // can't be followed by expression, the tokenizer assumes
-              // that "function" starts a statement.
-              // Fixing it in the tokenizer would mean tracking not only the
-              // previous token ("async"), but also the one before to know
-              // its beforeExpr value.
-              // It's easier and more efficient to adjust the context here.
-              throw new Error("Internal error");
-            }
-            this.state.context[last] = ct.functionExpression;
-
             this.next();
             return this.parseFunction(
               this.startNodeAtNode(id),
@@ -1067,7 +1037,9 @@ export default class ExpressionParser extends LValParser {
         return this.parseDo(false);
       }
 
-      case tt.regexp: {
+      case tt.slash:
+      case tt.slashAssign: {
+        this.readRegexp();
         return this.parseRegExpLiteral(this.state.value);
       }
 
@@ -1091,8 +1063,10 @@ export default class ExpressionParser extends LValParser {
       case tt._false:
         return this.parseBooleanLiteral(false);
 
-      case tt.parenL:
+      case tt.parenL: {
+        const canBeArrow = this.state.potentialArrowAt === this.state.start;
         return this.parseParenAndDistinguishExpression(canBeArrow);
+      }
 
       case tt.bracketBarL:
       case tt.bracketHashL: {
@@ -1460,7 +1434,6 @@ export default class ExpressionParser extends LValParser {
     const innerStartLoc = this.state.startLoc;
     const exprList = [];
     const refExpressionErrors = new ExpressionErrors();
-    const refNeedsArrowPos = { start: 0 };
     let first = true;
     let spreadStart;
     let optionalCommaStart;
@@ -1469,7 +1442,12 @@ export default class ExpressionParser extends LValParser {
       if (first) {
         first = false;
       } else {
-        this.expect(tt.comma, refNeedsArrowPos.start || null);
+        this.expect(
+          tt.comma,
+          refExpressionErrors.optionalParameters === -1
+            ? null
+            : refExpressionErrors.optionalParameters,
+        );
         if (this.match(tt.parenR)) {
           optionalCommaStart = this.state.start;
           break;
@@ -1496,7 +1474,6 @@ export default class ExpressionParser extends LValParser {
           this.parseMaybeAssignAllowIn(
             refExpressionErrors,
             this.parseParenItem,
-            refNeedsArrowPos,
           ),
         );
       }
@@ -1528,7 +1505,6 @@ export default class ExpressionParser extends LValParser {
     if (optionalCommaStart) this.unexpected(optionalCommaStart);
     if (spreadStart) this.unexpected(spreadStart);
     this.checkExpressionErrors(refExpressionErrors, true);
-    if (refNeedsArrowPos.start) this.unexpected(refNeedsArrowPos.start);
 
     this.toReferencedListDeep(exprList, /* isParenthesizedExpr */ true);
     if (exprList.length > 1) {
@@ -1714,11 +1690,6 @@ export default class ExpressionParser extends LValParser {
       node.properties.push(prop);
     }
 
-    // The tokenizer uses `braceIsBlock` to detect whether `{` starts a block statement.
-    // If `{` is a block statement, `exprAllowed` will be `true`.
-    // However the tokenizer can not handle edge cases like `0 ? a : { a : 1 } / 2`, here
-    // we update `exprAllowed` when an object-like is parsed.
-    this.state.exprAllowed = false;
     this.next();
 
     this.state.inFSharpPipelineDirectBody = oldInFSharpPipelineDirectBody;
@@ -2290,7 +2261,6 @@ export default class ExpressionParser extends LValParser {
   parseExprListItem(
     allowEmpty: ?boolean,
     refExpressionErrors?: ?ExpressionErrors,
-    refNeedsArrowPos: ?Pos,
     allowPlaceholder: ?boolean,
   ): ?N.Expression {
     let elt;
@@ -2302,8 +2272,9 @@ export default class ExpressionParser extends LValParser {
     } else if (this.match(tt.ellipsis)) {
       const spreadNodeStartPos = this.state.start;
       const spreadNodeStartLoc = this.state.startLoc;
+
       elt = this.parseParenItem(
-        this.parseSpread(refExpressionErrors, refNeedsArrowPos),
+        this.parseSpread(refExpressionErrors),
         spreadNodeStartPos,
         spreadNodeStartLoc,
       );
@@ -2319,7 +2290,6 @@ export default class ExpressionParser extends LValParser {
       elt = this.parseMaybeAssignAllowIn(
         refExpressionErrors,
         this.parseParenItem,
-        refNeedsArrowPos,
       );
     }
     return elt;
@@ -2354,18 +2324,6 @@ export default class ExpressionParser extends LValParser {
       name = this.state.value;
     } else if (type.keyword) {
       name = type.keyword;
-
-      // `class` and `function` keywords push function-type token context into this.context.
-      // But there is no chance to pop the context if the keyword is consumed
-      // as an identifier such as a property name.
-      const curContext = this.curContext();
-      if (
-        (type === tt._class || type === tt._function) &&
-        (curContext === ct.functionStatement ||
-          curContext === ct.functionExpression)
-      ) {
-        this.state.context.pop();
-      }
     } else {
       throw this.unexpected();
     }
@@ -2389,12 +2347,22 @@ export default class ExpressionParser extends LValParser {
     checkKeywords: boolean,
     isBinding: boolean,
   ): void {
-    if (this.prodParam.hasYield && word === "yield") {
-      this.raise(startLoc, Errors.YieldBindingIdentifier);
+    // Every JavaScript reserved word is 10 characters or less.
+    if (word.length > 10) {
+      return;
+    }
+    // Most identifiers are not reservedWord-like, they don't need special
+    // treatments afterward, which very likely ends up throwing errors
+    if (!canBeReservedWord(word)) {
       return;
     }
 
-    if (word === "await") {
+    if (word === "yield") {
+      if (this.prodParam.hasYield) {
+        this.raise(startLoc, Errors.YieldBindingIdentifier);
+        return;
+      }
+    } else if (word === "await") {
       if (this.prodParam.hasAwait) {
         this.raise(startLoc, Errors.AwaitBindingIdentifier);
         return;
@@ -2407,16 +2375,13 @@ export default class ExpressionParser extends LValParser {
           Errors.AwaitBindingIdentifier,
         );
       }
+    } else if (word === "arguments") {
+      if (this.scope.inClassAndNotInNonArrowFunction) {
+        this.raise(startLoc, Errors.ArgumentsInClass);
+        return;
+      }
     }
 
-    if (
-      this.scope.inClass &&
-      !this.scope.inNonArrowFunction &&
-      word === "arguments"
-    ) {
-      this.raise(startLoc, Errors.ArgumentsInClass);
-      return;
-    }
     if (checkKeywords && isKeyword(word)) {
       this.raise(startLoc, Errors.UnexpectedKeyword, word);
       return;
@@ -2500,17 +2465,30 @@ export default class ExpressionParser extends LValParser {
     );
 
     this.next();
-    if (
-      this.match(tt.semi) ||
-      (!this.match(tt.star) && !this.state.type.startsExpr) ||
-      this.hasPrecedingLineBreak()
-    ) {
-      node.delegate = false;
-      node.argument = null;
-    } else {
-      node.delegate = this.eat(tt.star);
-      node.argument = this.parseMaybeAssign();
+    let delegating = false;
+    let argument = null;
+    if (!this.hasPrecedingLineBreak()) {
+      delegating = this.eat(tt.star);
+      switch (this.state.type) {
+        case tt.semi:
+        case tt.eof:
+        case tt.braceR:
+        case tt.parenR:
+        case tt.bracketR:
+        case tt.braceBarR:
+        case tt.colon:
+        case tt.comma:
+          // The above is the complete set of tokens that can
+          // follow an AssignmentExpression, and none of them
+          // can start an AssignmentExpression
+          if (!delegating) break;
+        /* fallthrough */
+        default:
+          argument = this.parseMaybeAssign();
+      }
     }
+    node.delegate = delegating;
+    node.argument = argument;
     return this.finishNode(node, "YieldExpression");
   }
 

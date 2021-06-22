@@ -8,8 +8,7 @@
 import type Parser from "../../parser";
 import { types as tt, type TokenType } from "../../tokenizer/types";
 import * as N from "../../types";
-import type { Pos, Position } from "../../util/location";
-import type State from "../../tokenizer/state";
+import type { Position } from "../../util/location";
 import { types as tc } from "../../tokenizer/context";
 import * as charCodes from "charcodes";
 import { isIteratorStart, isKeyword } from "../../util/identifier";
@@ -154,7 +153,7 @@ function hasTypeImportKind(node: N.Node): boolean {
   return node.importKind === "type" || node.importKind === "typeof";
 }
 
-function isMaybeDefaultImport(state: State): boolean {
+function isMaybeDefaultImport(state: { type: TokenType, value: any }): boolean {
   return (
     (state.type === tt.name || !!state.type.keyword) && state.value !== "from"
   );
@@ -1711,10 +1710,6 @@ export default (superClass: Class<Parser>): Class<Parser> =>
       this.state.inType = true;
       const type = this.flowParseUnionType();
       this.state.inType = oldInType;
-      // Ensure that a brace after a function generic type annotation is a
-      // statement, except in arrow functions (noAnonFunctionType)
-      this.state.exprAllowed =
-        this.state.exprAllowed || this.state.noAnonFunctionType;
       return type;
     }
 
@@ -1911,20 +1906,23 @@ export default (superClass: Class<Parser>): Class<Parser> =>
       expr: N.Expression,
       startPos: number,
       startLoc: Position,
-      refNeedsArrowPos?: ?Pos,
+      refExpressionErrors?: ?ExpressionErrors,
     ): N.Expression {
       if (!this.match(tt.question)) return expr;
 
       // only use the expensive "tryParse" method if there is a question mark
       // and if we come from inside parens
-      if (refNeedsArrowPos) {
+      if (this.state.maybeInArrowParameters) {
         const result = this.tryParse(() =>
           super.parseConditional(expr, startPos, startLoc),
         );
 
         if (!result.node) {
-          // $FlowIgnore
-          refNeedsArrowPos.start = result.error.pos || this.state.start;
+          if (result.error) {
+            /*:: invariant(refExpressionErrors != null) */
+            super.setOptionalParametersError(refExpressionErrors, result.error);
+          }
+
           return expr;
         }
 
@@ -1978,7 +1976,7 @@ export default (superClass: Class<Parser>): Class<Parser> =>
       node.test = expr;
       node.consequent = consequent;
       node.alternate = this.forwardNoArrowParamsConversionAt(node, () =>
-        this.parseMaybeAssign(undefined, undefined, undefined),
+        this.parseMaybeAssign(undefined, undefined),
       );
 
       return this.finishNode(node, "ConditionalExpression");
@@ -2825,7 +2823,6 @@ export default (superClass: Class<Parser>): Class<Parser> =>
     parseMaybeAssign(
       refExpressionErrors?: ?ExpressionErrors,
       afterLeftParse?: Function,
-      refNeedsArrowPos?: ?Pos,
     ): N.Expression {
       let state = null;
 
@@ -2838,25 +2835,22 @@ export default (superClass: Class<Parser>): Class<Parser> =>
         state = this.state.clone();
 
         jsx = this.tryParse(
-          () =>
-            super.parseMaybeAssign(
-              refExpressionErrors,
-              afterLeftParse,
-              refNeedsArrowPos,
-            ),
+          () => super.parseMaybeAssign(refExpressionErrors, afterLeftParse),
           state,
         );
-        /*:: invariant(!jsx.aborted) */
 
+        /*:: invariant(!jsx.aborted) */
+        /*:: invariant(jsx.node != null) */
         if (!jsx.error) return jsx.node;
 
         // Remove `tc.j_expr` and `tc.j_oTag` from context added
         // by parsing `jsxTagStart` to stop the JSX plugin from
         // messing with the tokens
         const { context } = this.state;
-        if (context[context.length - 1] === tc.j_oTag) {
+        const curContext = context[context.length - 1];
+        if (curContext === tc.j_oTag) {
           context.length -= 2;
-        } else if (context[context.length - 1] === tc.j_expr) {
+        } else if (curContext === tc.j_expr) {
           context.length -= 1;
         }
       }
@@ -2875,7 +2869,6 @@ export default (superClass: Class<Parser>): Class<Parser> =>
               const result = super.parseMaybeAssign(
                 refExpressionErrors,
                 afterLeftParse,
-                refNeedsArrowPos,
               );
 
               this.resetStartLocationFromNode(result, typeParameters);
@@ -2955,11 +2948,7 @@ export default (superClass: Class<Parser>): Class<Parser> =>
         );
       }
 
-      return super.parseMaybeAssign(
-        refExpressionErrors,
-        afterLeftParse,
-        refNeedsArrowPos,
-      );
+      return super.parseMaybeAssign(refExpressionErrors, afterLeftParse);
     }
 
     // handle return types for arrow functions
@@ -3073,6 +3062,7 @@ export default (superClass: Class<Parser>): Class<Parser> =>
           state,
         );
 
+        /*:: invariant(arrow.node != null) */
         if (!arrow.error && !arrow.aborted) return arrow.node;
 
         const result = this.tryParse(
@@ -3705,20 +3695,6 @@ export default (superClass: Class<Parser>): Class<Parser> =>
         nameLoc: id.start,
       });
       return this.finishNode(node, "EnumDeclaration");
-    }
-
-    updateContext(prevType: TokenType): void {
-      if (
-        this.match(tt.name) &&
-        this.state.value === "of" &&
-        prevType === tt.name &&
-        this.input.slice(this.state.lastTokStart, this.state.lastTokEnd) ===
-          "interface"
-      ) {
-        this.state.exprAllowed = false;
-      } else {
-        super.updateContext(prevType);
-      }
     }
 
     // check if the next token is a tt.relation("<")

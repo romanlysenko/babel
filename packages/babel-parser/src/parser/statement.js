@@ -2114,7 +2114,7 @@ export default class StatementParser extends ExpressionParser {
       | N.ExportDefaultSpecifier,
     name: string,
   ): void {
-    if (this.state.exportedIdentifiers.indexOf(name) > -1) {
+    if (this.exportedIdentifiers.has(name)) {
       this.raise(
         node.start,
         name === "default"
@@ -2123,7 +2123,7 @@ export default class StatementParser extends ExpressionParser {
         name,
       );
     }
-    this.state.exportedIdentifiers.push(name);
+    this.exportedIdentifiers.add(name);
   }
 
   // Parses a comma-separated list of module exports.
@@ -2255,32 +2255,23 @@ export default class StatementParser extends ExpressionParser {
 
       // parse AssertionKey : IdentifierName, StringLiteral
       const keyName = this.state.value;
+      // check if we already have an entry for an attribute
+      // if a duplicate entry is found, throw an error
+      // for now this logic will come into play only when someone declares `type` twice
+      if (attrNames.has(keyName)) {
+        this.raise(
+          this.state.start,
+          Errors.ModuleAttributesWithDuplicateKeys,
+          keyName,
+        );
+      }
+      attrNames.add(keyName);
       if (this.match(tt.string)) {
         node.key = this.parseStringLiteral(keyName);
       } else {
         node.key = this.parseIdentifier(true);
       }
       this.expect(tt.colon);
-
-      // for now we are only allowing `type` as the only allowed module attribute
-      if (keyName !== "type") {
-        this.raise(
-          node.key.start,
-          Errors.ModuleAttributeDifferentFromType,
-          keyName,
-        );
-      }
-      // check if we already have an entry for an attribute
-      // if a duplicate entry is found, throw an error
-      // for now this logic will come into play only when someone declares `type` twice
-      if (attrNames.has(keyName)) {
-        this.raise(
-          node.key.start,
-          Errors.ModuleAttributesWithDuplicateKeys,
-          keyName,
-        );
-      }
-      attrNames.add(keyName);
 
       if (!this.match(tt.string)) {
         throw this.unexpected(
